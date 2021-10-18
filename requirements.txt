@@ -1,0 +1,6 @@
+requests~=2.26.0
+pytest~=6.2.5
+setuptools~=58.2.0
+pdftotext~=2.2.1
+beautifulsoup4~=4.10.0
+Camelot~=12.6.29
