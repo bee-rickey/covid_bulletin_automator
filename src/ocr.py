@@ -1,9 +1,5 @@
 import os
-import sys
 import io
-import json
-import operator
-import pickle
 import cv2
 import numpy as np
 from google.cloud import vision
@@ -16,6 +12,13 @@ class GoogleVision:
     """
     Read google vision output and build an array of dictionaries
     containing text information
+    Object format for texts:
+    text: "actual text from image",
+    vertices: array of four corners of text
+    lower_left: lower left vertex of text
+    upper_right: upper right vertex of text
+    x-mid: midpoint x coordinate of text
+    y-mid: midpoint y coordinate of text
     """
 
     def detect_text(self, path):
@@ -30,7 +33,6 @@ class GoogleVision:
 
         response = client.document_text_detection(image=image)
         output = MessageToJson(response._pb)
-        temporary_array = []
 
         for index, text in enumerate(output['textAnnotations']):
             if index == 0:
@@ -45,9 +47,9 @@ class GoogleVision:
                 "x_mid": (vertices[0]['x'] + vertices[2]['x']) / 2
             }
 
-            temporary_array.append(text_item)
+            self.text_array.append(text_item)
 
-        self.text_array = sorted(temporary_array, key=lambda item: (item['x_mid'], -item['y_mid']))
+        self.text_array.sort(key=lambda item: (item['x_mid'], -item['y_mid']))
 
         if response.error.message:
             raise Exception(
@@ -68,14 +70,15 @@ class GoogleVision:
 
 class Ocr:
     """
-    Arrange the image data into rows and cols.
+    Arrange the image data into rows.
     Remove unwanted rows (assuming district name is part of row)
     Display image with texts matched
     """
 
     def __init__(self, google_vision, state_name, start_string, end_string):
+        self.vertical_lines = []
         self.rows_found = {}
-        self.filtered_rows = {}
+        self.column_list = []
         self.translation_dictionary = {}
         self.district_dictionary = []
         self.start_string = start_string
@@ -84,16 +87,47 @@ class Ocr:
 
         self.read_districts(state_name)
         self.assign_rows(google_vision.text_array)
-        self.mark_unwanted_rows()
-        self.assign_columns()
 
     def hough_transform(self):
         img = cv2.imread(self.google_vision.image_name)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(img, 50, 150)
         config_min_line_length = 400
         lines = cv2.HoughLinesP(edges, 1, np.pi / 135, config_min_line_length, maxLineGap=250)
+        vertical_lines = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            line_coordinates = \
+                {
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2
+                }
+            vertical_lines.append(line_coordinates)
 
+        vertical_lines.sort(key=lambda item: item["x1"])
+        column_number = 1
+        for index, lines in enumerate(vertical_lines):
+            # If first vertical line, then just move ahead
+            if index == 0:
+                previous_x = lines["x1"]
+                previous_y = lines["y1"]
+                continue
+
+            # This condition checks if two detected
+            # lines are too close to each other. If so, ignore.
+            if lines["x1"] - previous_x < 5:
+                continue
+
+            # Add the column definition to the column_list
+            self.column_list.append({
+                "col_left_x": previous_x,
+                "col_left_y": previous_y,
+                "col_right_x": lines["x1"],
+                "col_right_y": lines["y1"],
+                "column_number": column_number
+            })
+            column_number += 1
 
     def read_districts(self, state_name):
         name_to_code = {}
@@ -121,20 +155,25 @@ class Ocr:
         row = 1
         previous_text = None
         for text in google_vision_output:
+            valid_row = self.is_district_present(text)
             if previous_text is None:
-                text['row'] = row
                 text['row'] = row
                 previous_text = text
                 self.rows_found[row] = {
                     'number': row,
-                    'values': [text]
+                    'values': [text],
+                    'valid_row': valid_row,
                 }
                 continue
             # Next text block lies within ranges of the previous text block
             # Essentially they are on the same row
-            if previous_text['upper_right']['y'] > text['y_mid'] > previous_text['lower_left']['y']:
+            if previous_text['upper_right']['y'] > \
+                    text['y_mid'] > previous_text['lower_left']['y']:
                 text['row'] = row
                 self.rows_found[row]['values'].append(text)
+                if self.rows_found[row]['valid_row'] is False:
+                    self.rows_found[row]['valid_row'] \
+                        = valid_row
             else:
                 # Seems to be a new row, so start off with the first text.
                 previous_text = text
@@ -142,31 +181,56 @@ class Ocr:
                 text['row'] = row
                 self.rows_found[row] = {
                     'values': [text],
-                    'number': row
+                    'number': row,
+                    'valid_row': valid_row
                 }
 
     def is_district_present(self, text_block):
         if text_block['text'].strip().title() in self.district_dictionary:
             return True
         else:
-            False
+            return False
 
-    def mark_unwanted_rows(self):
-        for item in self.rows_found.values():
-            item['valid_row'] = False
-            for text_block in item['values']:
-                if self.is_district_present(text_block):
-                    item['valid_row'] = True
-                    break
+    def check_coordinates(self, previous_text, current_text):
+        for column in self.column_list:
+            if column['col_left_x'] \
+                    <= previous_text['lower_left']['x'] \
+                    <= column['col_right_x'] \
+                    and column['col_left_x'] \
+                    <= current_text['lower_left']['x'] \
+                    <= column['col_right_x']:
+                return True
 
-        self.filtered_rows = {key: value
-                              for key, value in self.rows_found.items()
-                              if value['valid_row'] is True}
+    def is_numeric(self, text):
+        try:
+            int(text['text'])
+            return True
+        except ValueError:
+            return False
+        except Exception:
+            return False
 
-    def assign_columns(self):
-        print("Hello")
+    def print_lines(self):
+        for key, row in self.rows_found.items():
+            if row['valid_row'] is False:
+                continue
+            string_output = ""
+            row['values'].sort(key=lambda item: item['lower_left']["x"])
+            for index, text in enumerate(row['values']):
+                if text['text'] in self.translation_dictionary:
+                    text['text'] = \
+                        self.translation_dictionary[text['text']]
 
+                if index == 0:
+                    string_output = text['text']
+                    continue
 
+                if self.check_coordinates(row['values'][index - 1], text) \
+                        or self.is_numeric(text) == False:
+                    string_output += " "
+
+                string_output = string_output + "," + text['text']
+            print(f"{string_output}")
 
 
 def main():
@@ -198,6 +262,8 @@ def main():
     translation_required = args.translation_required
 
     ocr = Ocr(google_vision, state_name, start_string, end_string)
+    ocr.hough_transform()
+    ocr.print_lines()
 
 
 if __name__ == '__main__':

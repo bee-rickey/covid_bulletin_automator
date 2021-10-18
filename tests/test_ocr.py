@@ -1,11 +1,17 @@
+import io
+import sys
 from unittest import mock
 from unittest.mock import Mock
 from ocr import GoogleVision
-
 from ocr import Ocr
+import numpy as np
 
 
 class MockClient():
+    """
+    Mock class to mimick google vision
+    """
+
     def document_text_detection(self, image):
         mock = Mock()
         mock._rb = Mock(return_value='wheeeeee')
@@ -250,10 +256,188 @@ def test_row_validation():
             assert len(ocr.rows_found[2]['values']) == 2
             assert ocr.rows_found[2]['values'][0]['text'] == "second row - 1st entry"
 
-            assert len(ocr.filtered_rows) == 1
-            assert ocr.filtered_rows[1]['valid_row'] == True
+            filtered_rows = {key: value
+                             for key, value in ocr.rows_found.items()
+                             if value['valid_row'] is True}
+            assert len(filtered_rows) == 1
+            assert filtered_rows[1]['valid_row'] == True
+            assert (ocr.rows_found[2]['valid_row']) == False
+            assert ocr.rows_found[1]['valid_row'] == True
 
-        assert(ocr.rows_found[2]['valid_row']) == False
-        assert ocr.rows_found[1]['valid_row'] == True
 
 def test_hough_transform():
+    mock_state_code = mock.mock_open(read_data='Karnataka, KA\n' \
+                                               'Tamil Nadu, TN\n'
+                                               'West Bengal, WB')
+    with mock.patch("ocr.open", mock_state_code):
+        with mock.patch("ocr.GoogleVision") as mock_google_vision:
+            with mock.patch("ocr.cv2") as mock_cv2:
+                mock_cv2.imread.return_value = True
+                mock_cv2.cvtColor.return_value = True
+                mock_cv2.Canny.return_value = True
+                mock_cv2.HoughLinesP.return_value = \
+                    np.array([
+                        [[100, 120, 100, 10]],
+                        [[91, 120, 91, 10]],
+                        [[110, 120, 110, 10]],
+                        [[90, 120, 90, 10]]
+                    ])
+                mock_google_vision.text_array = []
+                mock_google_vision.image_name = ""
+                ocr = Ocr(mock_google_vision, "Karnataka", "", "")
+                ocr.hough_transform()
+                column_list_expected = [
+                    {
+                        "col_left_x": 90,
+                        "col_left_y": 120,
+                        "col_right_x": 100,
+                        "col_right_y": 120
+                    },
+                    {
+                        "col_left_x": 100,
+                        "col_left_y": 120,
+                        "col_right_x": 110,
+                        "col_right_y": 120
+                    },
+                ]
+                assert column_list_expected, ocr.column_list
+
+
+def test_print_output_without_hough():
+    mock_state_code = mock.mock_open(read_data='Karnataka, KA\n' \
+                                               'Tamil Nadu, TN\n'
+                                               'West Bengal, WB')
+
+    district_string = 'Bangalore, Bengaluru\nTumakuru, Tumkur'
+
+    google_vision_json = [
+        {'text': 'Bangalore',
+         'y_mid': 51,
+         'upper_right': {'x': 10, 'y': 55},
+         'lower_left': {'x': 5, 'y': 45}
+         },
+        {'text': '100',
+         'y_mid': 50,
+         'upper_right': {'x': 25, 'y': 56},
+         'lower_left': {'x': 20, 'y': 46}
+         },
+        {'text': '200',
+         'y_mid': 50,
+         'upper_right': {'x': 40, 'y': 54},
+         'lower_left': {'x': 35, 'y': 46},
+         },
+        {'text': 'second row - 1st entry',
+         'y_mid': 44,
+         'upper_right': {'x': 10, 'y': 49},
+         'lower_left': {'x': 5, 'y': 40},
+         },
+        {'text': 'second row - 2nd entry',
+         'y_mid': 44,
+         'upper_right': {'x': 25, 'y': 50},
+         'lower_left': {'x': 20, 'y': 40},
+         },
+        {'text': 'Tumakuru',
+         'y_mid': 51,
+         'upper_right': {'x': 10, 'y': 55},
+         'lower_left': {'x': 5, 'y': 45}
+         },
+        {'text': '100',
+         'y_mid': 50,
+         'upper_right': {'x': 25, 'y': 56},
+         'lower_left': {'x': 20, 'y': 46}
+         },
+        {'text': '200',
+         'y_mid': 50,
+         'upper_right': {'x': 40, 'y': 54},
+         'lower_left': {'x': 35, 'y': 46},
+         },
+    ]
+
+    with mock.patch("ocr.open", mock_state_code):
+        with mock.patch("ocr.GoogleVision") as mock_google_vision:
+            mock_google_vision.text_array = google_vision_json
+            handlers = (mock_state_code.return_value, mock.mock_open(read_data=district_string).return_value)
+            mock_state_code.side_effect = handlers
+            ocr = Ocr(mock_google_vision, "Karnataka", "", "")
+            assert len(ocr.rows_found) == 3
+
+            captured_output = io.StringIO()  # Create StringIO object
+            sys.stdout = captured_output
+
+            ocr.print_lines()
+
+            expected_output = "Bengaluru,100,200\nTumkur,100,200\n"
+            assert captured_output.getvalue() == expected_output
+
+            sys.stdout = sys.__stdout__
+
+
+def test_print_output_with_multiple_texts():
+    mock_state_code = mock.mock_open(read_data='Karnataka, KA\n' \
+                                               'Tamil Nadu, TN\n'
+                                               'West Bengal, WB')
+
+    district_string = 'Dakshin Dinajpur, Dakshin Dinajpur\nKolkata, Kolkata'
+
+    google_vision_json = [
+        {'text': 'Dakshin Dinajpur',
+         'y_mid': 51,
+         'upper_right': {'x': 10, 'y': 55},
+         'lower_left': {'x': 5, 'y': 45}
+         },
+        {'text': '100',
+         'y_mid': 50,
+         'upper_right': {'x': 25, 'y': 56},
+         'lower_left': {'x': 20, 'y': 46}
+         },
+        {'text': '200',
+         'y_mid': 50,
+         'upper_right': {'x': 40, 'y': 54},
+         'lower_left': {'x': 35, 'y': 46},
+         },
+        {'text': 'second row - 1st entry',
+         'y_mid': 44,
+         'upper_right': {'x': 10, 'y': 49},
+         'lower_left': {'x': 5, 'y': 40},
+         },
+        {'text': 'second row - 2nd entry',
+         'y_mid': 44,
+         'upper_right': {'x': 25, 'y': 50},
+         'lower_left': {'x': 20, 'y': 40},
+         },
+        {'text': 'Kolkata',
+         'y_mid': 51,
+         'upper_right': {'x': 10, 'y': 55},
+         'lower_left': {'x': 5, 'y': 45}
+         },
+        {'text': '100',
+         'y_mid': 50,
+         'upper_right': {'x': 25, 'y': 56},
+         'lower_left': {'x': 20, 'y': 46}
+         },
+        {'text': '200',
+         'y_mid': 50,
+         'upper_right': {'x': 40, 'y': 54},
+         'lower_left': {'x': 35, 'y': 46},
+         },
+    ]
+
+    with mock.patch("ocr.open", mock_state_code):
+        with mock.patch("ocr.GoogleVision") as mock_google_vision:
+            mock_google_vision.text_array = google_vision_json
+            handlers = (mock_state_code.return_value, mock.mock_open(read_data=district_string).return_value)
+            mock_state_code.side_effect = handlers
+            ocr = Ocr(mock_google_vision, "West Bengal", "", "")
+            assert len(ocr.rows_found) == 3
+            ocr.print_lines()
+            """
+            captured_output = io.StringIO()  # Create StringIO object
+            sys.stdout = captured_output
+
+            ocr.print_lines()
+
+            expected_output = "Dakshin Dinajpur,100,200\nKolkata,100,200\n"
+            assert captured_output.getvalue() == expected_output
+                
+            sys.stdout = sys.__stdout__
+            """

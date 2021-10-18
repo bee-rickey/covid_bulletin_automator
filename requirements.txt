@@ -4,3 +4,6 @@ setuptools~=58.2.0
 pdftotext~=2.2.1
 beautifulsoup4~=4.10.0
 Camelot~=12.6.29
+opencv-python~=4.5.3.56
+matplotlib==3.3.2
+google-cloud-vision==2.5.0
