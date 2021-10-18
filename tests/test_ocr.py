@@ -429,8 +429,7 @@ def test_print_output_with_multiple_texts():
             mock_state_code.side_effect = handlers
             ocr = Ocr(mock_google_vision, "West Bengal", "", "")
             assert len(ocr.rows_found) == 3
-            ocr.print_lines()
-            """
+
             captured_output = io.StringIO()  # Create StringIO object
             sys.stdout = captured_output
 
@@ -440,4 +439,4 @@ def test_print_output_with_multiple_texts():
             assert captured_output.getvalue() == expected_output
                 
             sys.stdout = sys.__stdout__
-            """
+
