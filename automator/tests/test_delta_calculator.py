@@ -3,6 +3,7 @@ Test out delta calculator logic
 """
 import io
 import sys
+sys.path.insert(0, '../')
 from unittest import mock
 import pytest
 import requests_mock

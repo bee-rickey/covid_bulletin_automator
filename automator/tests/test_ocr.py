@@ -1,5 +1,6 @@
 import io
 import sys
+sys.path.insert(0, '../')
 from unittest import mock
 from unittest.mock import Mock
 from ocr import GoogleVision
