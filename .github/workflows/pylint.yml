@@ -20,4 +20,4 @@ jobs:
         export PYTHONPATH=$PYTHONPATH:covid_bulletin_automator/automator
     - name: Analysing the code with pylint
       run: |
-        pylint `ls -R|grep .py$| grep -v "test_" |xargs`
+        cd automator && pylint `ls -R|grep .py$| grep -v "test_" |xargs`
