@@ -1,10 +1,11 @@
 import os
 import io
 import cv2
+import re
+import json
 import numpy as np
 from google.cloud import vision
 from google.protobuf.json_format import MessageToJson
-
 import argparse
 
 
@@ -32,7 +33,7 @@ class GoogleVision:
         image = vision.Image(content=content)
 
         response = client.document_text_detection(image=image)
-        output = MessageToJson(response._pb)
+        output = json.loads(MessageToJson(response._pb))
 
         for index, text in enumerate(output['textAnnotations']):
             if index == 0:
@@ -49,23 +50,24 @@ class GoogleVision:
 
             self.text_array.append(text_item)
 
-        self.text_array.sort(key=lambda item: (item['x_mid'], -item['y_mid']))
-
+        self.text_array.sort(key=lambda item: (item['y_mid']))
+        """
         if response.error.message:
             raise Exception(
                 '{}\nFor more info on error messages, check: '
                 'https://cloud.google.com/apis/design/errors'.format(
                     response.error.message))
+        """
 
-    def __init__(self, file_name):
+    def __init__(self, image_name):
         """
         Call detect_text
         :param file_name:
         """
-        self.file_name = file_name
+        self.image_name = image_name
         self.text_array = []
-        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = "../../../visionapi.json"
-        self.detect_text(file_name)
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = "../visionapi.json"
+        self.detect_text(image_name)
 
 
 class Ocr:
@@ -79,20 +81,19 @@ class Ocr:
         self.vertical_lines = []
         self.rows_found = {}
         self.column_list = []
+        self.config_min_line_length = 400
         self.translation_dictionary = {}
         self.district_dictionary = []
         self.start_string = start_string
         self.end_string = end_string
         self.google_vision = google_vision
-
         self.read_districts(state_name)
         self.assign_rows(google_vision.text_array)
 
     def hough_transform(self):
         img = cv2.imread(self.google_vision.image_name)
         edges = cv2.Canny(img, 50, 150)
-        config_min_line_length = 400
-        lines = cv2.HoughLinesP(edges, 1, np.pi / 135, config_min_line_length, maxLineGap=250)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 135, int(self.config_min_line_length), maxLineGap=250)
         vertical_lines = []
         for line in lines:
             x1, y1, x2, y2 = line[0]
@@ -127,6 +128,9 @@ class Ocr:
                 "col_right_y": lines["y1"],
                 "column_number": column_number
             })
+            previous_x = lines["x1"]
+            previous_y = lines["y1"]
+
             column_number += 1
 
     def read_districts(self, state_name):
@@ -142,7 +146,7 @@ class Ocr:
                 line = lines.split(',')
                 self.translation_dictionary[line[0].strip().title()] \
                     = line[1].strip().title()
-                self.district_dictionary.append(line[0].strip().title())
+                self.district_dictionary.append(line[1].strip().title())
 
     def assign_rows(self, google_vision_output):
         """
@@ -154,26 +158,22 @@ class Ocr:
         """
         row = 1
         previous_text = None
+
         for text in google_vision_output:
-            valid_row = self.is_district_present(text)
             if previous_text is None:
                 text['row'] = row
                 previous_text = text
                 self.rows_found[row] = {
                     'number': row,
-                    'values': [text],
-                    'valid_row': valid_row,
+                    'values': [text]
                 }
                 continue
             # Next text block lies within ranges of the previous text block
             # Essentially they are on the same row
-            if previous_text['upper_right']['y'] > \
-                    text['y_mid'] > previous_text['lower_left']['y']:
-                text['row'] = row
+            tolerance_upper = previous_text['y_mid'] + 5
+            tolerance_lower = previous_text['y_mid'] - 5
+            if tolerance_lower < text['y_mid'] < tolerance_upper:
                 self.rows_found[row]['values'].append(text)
-                if self.rows_found[row]['valid_row'] is False:
-                    self.rows_found[row]['valid_row'] \
-                        = valid_row
             else:
                 # Seems to be a new row, so start off with the first text.
                 previous_text = text
@@ -181,57 +181,73 @@ class Ocr:
                 text['row'] = row
                 self.rows_found[row] = {
                     'values': [text],
-                    'number': row,
-                    'valid_row': valid_row
+                    'number': row
                 }
 
-    def is_district_present(self, text_block):
-        if text_block['text'].strip().title() in self.district_dictionary:
-            return True
-        else:
-            return False
+    def is_district_present(self, text):
+        for district in self.district_dictionary:
+            if district.lower() in text.strip().lower():
+                return True
+        return False
 
     def check_coordinates(self, previous_text, current_text):
         for column in self.column_list:
             if column['col_left_x'] \
-                    <= previous_text['lower_left']['x'] \
-                    <= column['col_right_x'] \
+                    < previous_text['lower_left']['x'] \
+                    < column['col_right_x'] \
                     and column['col_left_x'] \
-                    <= current_text['lower_left']['x'] \
-                    <= column['col_right_x']:
+                    < current_text['lower_left']['x'] \
+                    < column['col_right_x']:
                 return True
 
     def is_numeric(self, text):
         try:
-            int(text['text'])
+            int(text)
             return True
         except ValueError:
             return False
         except Exception:
             return False
 
+    @staticmethod
+    def replace_special_characters(text):
+        return re.sub(r"[*.#,]", '', text)
+
     def print_lines(self):
+        """
+        take rows found,
+        for each row
+        translate/map texts if it's present in dictionary.
+        Check the coordinates of all these texts with columns (if defined),
+        Append string.
+        Print if the string has a district string in it.
+        """
+
         for key, row in self.rows_found.items():
-            if row['valid_row'] is False:
-                continue
             string_output = ""
+
             row['values'].sort(key=lambda item: item['lower_left']["x"])
+
             for index, text in enumerate(row['values']):
+                text['text'] = Ocr.replace_special_characters(text['text'])
                 if text['text'] in self.translation_dictionary:
                     text['text'] = \
                         self.translation_dictionary[text['text']]
 
                 if index == 0:
-                    string_output = text['text']
+                    string_output = Ocr.replace_special_characters(text['text'])
                     continue
 
                 if self.check_coordinates(row['values'][index - 1], text) \
-                        or self.is_numeric(text) == False:
-                    string_output += " "
+                        or \
+                        (self.is_numeric(string_output) is False
+                         and self.is_numeric(text['text']) is False):
+                    string_output += f" {text['text']}"
+                    continue
 
-                string_output = string_output + "," + text['text']
+                string_output += "," + text['text']
+
             print(f"{string_output}")
-
 
 def main():
     """
@@ -242,7 +258,6 @@ def main():
     parser.add_argument('--state', type=str, required=True)
     parser.add_argument('--image', type=str, required=True)
     parser.add_argument('--start_end', type=str, required=True)
-    parser.add_argument('--translation_required', type=str, required=False)
     parser.add_argument('--skip_stages', type=str, required=False)
 
     args = parser.parse_args()
@@ -258,8 +273,6 @@ def main():
 
     start_string = start_end.start_end.split(',')[0]
     end_string = start_end.start_end.split(',')[1]
-
-    translation_required = args.translation_required
 
     ocr = Ocr(google_vision, state_name, start_string, end_string)
     ocr.hough_transform()

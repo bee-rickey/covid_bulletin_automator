@@ -1,0 +1,6 @@
+{
+  "Andhra Pradesh":{
+    "hough_transform": "True",
+    "min_line_length": "300"
+  }
+}
